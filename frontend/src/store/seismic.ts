@@ -1,6 +1,6 @@
 import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
-import type { WaveformData, PhasePick, Station, SeismicEvent } from '../types'
+import type { WaveformData, PhasePick, Station, SeismicEvent, Alert, NightAlertConfig } from '../types'
 
 export const useSeismicStore = defineStore('seismic', () => {
   const waveform = ref<WaveformData | null>(null)
@@ -23,21 +23,34 @@ export const useSeismicStore = defineStore('seismic', () => {
     { id: 'STA04', name: 'HIA', latitude: 49.3, longitude: 119.7, elevation: 610 },
   ])
 
+  const alerts = ref<Alert[]>([])
+  const isNight = ref(false)
+  const alertConfig = ref<NightAlertConfig>({
+    confidence_threshold: 0.8,
+    night_start_hour: 22,
+    night_end_hour: 6,
+    enabled: true,
+  })
+  const showAlertDialog = ref(false)
+  let alertPollTimer: ReturnType<typeof setInterval> | null = null
+
+  const pendingAlerts = computed(() => alerts.value.filter(a => !a.acknowledged))
+  const pendingAlertCount = computed(() => pendingAlerts.value.length)
+  const hasCriticalAlert = computed(() => pendingAlerts.value.some(a => a.severity === 'critical'))
+
   function generateMockWaveform(): WaveformData {
-    const sr = 100  // sampling rate Hz
-    const duration = 60  // seconds
+    const sr = 100
+    const duration = 60
     const n = sr * duration
     const time = Array.from({ length: n }, (_, i) => i / sr)
     const bhz: number[] = [], bhn: number[] = [], bhe: number[] = []
 
     for (let i = 0; i < n; i++) {
       const t = time[i]
-      // Background noise
       let vz = (Math.random() - 0.5) * 0.02
       let ns = (Math.random() - 0.5) * 0.02
       let ew = (Math.random() - 0.5) * 0.02
 
-      // P-wave arrival at t=10s
       if (t > 10 && t < 18) {
         const amp = 0.8 * Math.exp(-(t - 12) * (t - 12) / 8)
         vz += amp * Math.sin(2 * Math.PI * 8 * t)
@@ -45,7 +58,6 @@ export const useSeismicStore = defineStore('seismic', () => {
         ew += amp * 0.3 * Math.sin(2 * Math.PI * 8 * t + 1.0)
       }
 
-      // S-wave arrival at t=22s
       if (t > 22 && t < 40) {
         const amp = 1.5 * Math.exp(-(t - 28) * (t - 28) / 30)
         vz += amp * 0.4 * Math.sin(2 * Math.PI * 4 * t)
@@ -53,7 +65,6 @@ export const useSeismicStore = defineStore('seismic', () => {
         ew += amp * Math.sin(2 * Math.PI * 4 * t + 0.8)
       }
 
-      // Surface waves at t=35s
       if (t > 35 && t < 55) {
         const amp = 2.0 * Math.exp(-(t - 42) * (t - 42) / 50)
         vz += amp * Math.sin(2 * Math.PI * 1.5 * t)
@@ -69,12 +80,125 @@ export const useSeismicStore = defineStore('seismic', () => {
     return { time, bhz, bhn, bhe, samplingRate: sr }
   }
 
+  function checkLocalNightTime(): boolean {
+    const hour = new Date().getHours()
+    const start = alertConfig.value.night_start_hour
+    const end = alertConfig.value.night_end_hour
+    if (start > end) return hour >= start || hour < end
+    return start <= hour && hour < end
+  }
+
+  function evaluatePicksForAlerts() {
+    if (!alertConfig.value.enabled) return
+    const isNightNow = checkLocalNightTime()
+    isNight.value = isNightNow
+
+    const highConfPicks = picks.value.filter(p => p.confidence >= alertConfig.value.confidence_threshold)
+    if (highConfPicks.length === 0) return
+
+    const existingPickIds = new Set(alerts.value.map(a => a.pick_id))
+    const newAlerts: Alert[] = []
+
+    for (const pick of highConfPicks) {
+      if (existingPickIds.has(pick.id)) continue
+
+      let severity: Alert['severity'] = 'medium'
+      if (pick.confidence >= 0.95) severity = 'critical'
+      else if (pick.confidence >= 0.9) severity = 'high'
+
+      newAlerts.push({
+        id: `alert_${Date.now()}_${pick.id}`,
+        pick_id: pick.id,
+        pick_type: pick.type,
+        confidence: pick.confidence,
+        pick_time: pick.time,
+        station_id: selectedStation.value?.id ?? null,
+        station_name: selectedStation.value?.name ?? null,
+        created_at: new Date().toISOString(),
+        acknowledged: false,
+        acknowledged_at: null,
+        acknowledged_by: null,
+        severity,
+      })
+    }
+
+    if (newAlerts.length > 0) {
+      alerts.value = [...newAlerts, ...alerts.value]
+      if (isNightNow) {
+        showAlertDialog.value = true
+      }
+      sendAlertToBackend(newAlerts)
+    }
+  }
+
+  async function sendAlertToBackend(newAlerts: Alert[]) {
+    try {
+      const picksPayload = newAlerts.map(a => ({
+        id: a.pick_id,
+        type: a.pick_type,
+        confidence: a.confidence,
+        time: a.pick_time,
+      }))
+      await fetch('/api/alerts/evaluate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(picksPayload),
+      })
+    } catch { /* fallback: alerts still work locally */ }
+  }
+
+  async function acknowledgeAlert(alertId: string, operator: string = '值班员') {
+    const alert = alerts.value.find(a => a.id === alertId)
+    if (!alert) return
+
+    alert.acknowledged = true
+    alert.acknowledged_at = new Date().toISOString()
+    alert.acknowledged_by = operator
+
+    try {
+      await fetch('/api/alerts/acknowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ alert_id: alertId, operator }),
+      })
+    } catch { /* local state already updated */ }
+
+    if (pendingAlertCount.value === 0) {
+      showAlertDialog.value = false
+    }
+  }
+
+  function acknowledgeAllAlerts() {
+    for (const alert of pendingAlerts.value) {
+      alert.acknowledged = true
+      alert.acknowledged_at = new Date().toISOString()
+      alert.acknowledged_by = '值班员'
+    }
+    showAlertDialog.value = false
+  }
+
+  function startAlertPolling(intervalMs: number = 30000) {
+    stopAlertPolling()
+    alertPollTimer = setInterval(() => {
+      evaluatePicksForAlerts()
+    }, intervalMs)
+  }
+
+  function stopAlertPolling() {
+    if (alertPollTimer) {
+      clearInterval(alertPollTimer)
+      alertPollTimer = null
+    }
+  }
+
   function loadMockData() {
     waveform.value = generateMockWaveform()
     picks.value = [
       { id: 'p1', type: 'P', time: 10.2, confidence: 0.92, method: 'STA/LTA' },
       { id: 'p2', type: 'S', time: 22.5, confidence: 0.88, method: 'STA/LTA' },
     ]
+    evaluatePicksForAlerts()
+    startAlertPolling()
   }
 
   function staLtaPicking(): PhasePick[] {
@@ -123,6 +247,8 @@ export const useSeismicStore = defineStore('seismic', () => {
         const data = await resp.json()
         waveform.value = data.waveform
         picks.value = data.picks || []
+        evaluatePicksForAlerts()
+        startAlertPolling()
       }
     } catch {
       loadMockData()
@@ -134,6 +260,10 @@ export const useSeismicStore = defineStore('seismic', () => {
   return {
     waveform, picks, selectedStation, staWindow, ltaWindow, threshold,
     isLoading, events, stations,
-    loadMockData, staLtaPicking, uploadAndAnalyze, generateMockWaveform
+    alerts, isNight, alertConfig, showAlertDialog,
+    pendingAlerts, pendingAlertCount, hasCriticalAlert,
+    loadMockData, staLtaPicking, uploadAndAnalyze, generateMockWaveform,
+    evaluatePicksForAlerts, acknowledgeAlert, acknowledgeAllAlerts,
+    startAlertPolling, stopAlertPolling,
   }
 })

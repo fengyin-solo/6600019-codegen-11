@@ -1,8 +1,8 @@
 export interface WaveformData {
   time: number[]
-  bhz: number[]  // vertical component
-  bhn: number[]  // north component
-  bhe: number[]  // east component
+  bhz: number[]
+  bhn: number[]
+  bhe: number[]
   samplingRate: number
 }
 
@@ -28,4 +28,26 @@ export interface SeismicEvent {
   depth: number
   originTime: string
   location: string
+}
+
+export interface Alert {
+  id: string
+  pick_id: string
+  pick_type: string
+  confidence: number
+  pick_time: number
+  station_id: string | null
+  station_name: string | null
+  created_at: string
+  acknowledged: boolean
+  acknowledged_at: string | null
+  acknowledged_by: string | null
+  severity: 'medium' | 'high' | 'critical'
+}
+
+export interface NightAlertConfig {
+  confidence_threshold: number
+  night_start_hour: number
+  night_end_hour: number
+  enabled: boolean
 }

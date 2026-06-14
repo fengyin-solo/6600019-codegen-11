@@ -1,5 +1,7 @@
 <template>
   <div class="flex h-screen">
+    <NightAlertPanel />
+
     <!-- Sidebar -->
     <div class="w-72 bg-gray-900 p-4 flex flex-col gap-3 border-r border-gray-800 overflow-y-auto">
       <h1 class="text-lg font-bold text-cyan-400">地震波形 P/S 波分析</h1>
@@ -45,6 +47,40 @@
         <div v-if="!store.picks.length" class="text-gray-600 text-xs">加载数据后运行拾取</div>
       </div>
 
+      <!-- Night Alert Indicator -->
+      <div class="bg-gray-800 rounded-xl p-3" :class="{ 'ring-1 ring-amber-500': store.pendingAlertCount > 0 }">
+        <h3 class="text-cyan-300 font-bold text-sm mb-2">
+          夜间告警
+          <span v-if="store.pendingAlertCount > 0" class="ml-1 inline-flex items-center justify-center w-5 h-5 text-xs font-bold text-white bg-red-500 rounded-full alert-badge-pulse">
+            {{ store.pendingAlertCount }}
+          </span>
+        </h3>
+        <div class="flex items-center gap-2 mb-2">
+          <span class="w-2 h-2 rounded-full" :class="store.isNight ? 'bg-amber-400' : 'bg-gray-600'"></span>
+          <span class="text-xs" :class="store.isNight ? 'text-amber-400' : 'text-gray-500'">
+            {{ store.isNight ? '夜间模式' : '日间模式' }}
+          </span>
+          <span class="text-xs text-gray-600">
+            ({{ store.alertConfig.night_start_hour }}:00-{{ store.alertConfig.night_end_hour }}:00)
+          </span>
+        </div>
+        <div v-for="alert in store.pendingAlerts.slice(0, 3)" :key="alert.id"
+          class="flex items-center gap-2 bg-gray-700 rounded p-2 mb-1 text-xs cursor-pointer hover:bg-gray-600"
+          @click="store.showAlertDialog = true">
+          <span class="w-2 h-2 rounded-full" :class="alert.severity === 'critical' ? 'bg-red-500' : alert.severity === 'high' ? 'bg-orange-500' : 'bg-yellow-500'"></span>
+          <span :class="alert.pick_type === 'P' ? 'text-red-400' : 'text-blue-400'">{{ alert.pick_type }}</span>
+          <span class="text-gray-300">{{ (alert.confidence * 100).toFixed(0) }}%</span>
+          <span class="text-gray-500">{{ alert.pick_time.toFixed(2) }}s</span>
+        </div>
+        <div v-if="store.pendingAlertCount > 3" class="text-gray-500 text-xs text-center">
+          还有 {{ store.pendingAlertCount - 3 }} 条告警...
+        </div>
+        <div v-if="store.pendingAlertCount === 0" class="text-gray-600 text-xs">暂无待处理告警</div>
+        <button v-if="store.pendingAlertCount > 0" @click="store.showAlertDialog = true" class="w-full mt-2 bg-amber-600 py-1.5 rounded text-xs hover:bg-amber-500 text-white font-medium">
+          查看全部告警
+        </button>
+      </div>
+
       <!-- Stations -->
       <div class="bg-gray-800 rounded-xl p-3">
         <h3 class="text-cyan-300 font-bold text-sm mb-2">台站分布</h3>
@@ -77,10 +113,16 @@
 </template>
 
 <script setup lang="ts">
+import { onUnmounted } from 'vue'
 import { useSeismicStore } from './store/seismic'
 import WaveformChart from './components/WaveformChart.vue'
+import NightAlertPanel from './components/NightAlertPanel.vue'
 
 const store = useSeismicStore()
+
+onUnmounted(() => {
+  store.stopAlertPolling()
+})
 
 function onUpload(e: Event) {
   const file = (e.target as HTMLInputElement).files?.[0]
@@ -89,5 +131,17 @@ function onUpload(e: Event) {
 
 function runPick() {
   store.picks = store.staLtaPicking()
+  store.evaluatePicksForAlerts()
 }
 </script>
+
+<style>
+.alert-badge-pulse {
+  animation: badge-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes badge-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.2); }
+}
+</style>
