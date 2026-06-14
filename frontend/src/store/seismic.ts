@@ -1,6 +1,14 @@
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { defineStore } from 'pinia'
 import type { WaveformData, PhasePick, Station, SeismicEvent, Alert, NightAlertConfig } from '../types'
+
+const STORAGE_KEYS = {
+  ALERTS: 'seismic_alerts',
+  PICKS: 'seismic_picks',
+  ALERT_CONFIG: 'seismic_alert_config',
+  SELECTED_STATION: 'seismic_selected_station',
+  WAVEFORM: 'seismic_waveform',
+} as const
 
 export const useSeismicStore = defineStore('seismic', () => {
   const waveform = ref<WaveformData | null>(null)
@@ -10,6 +18,7 @@ export const useSeismicStore = defineStore('seismic', () => {
   const ltaWindow = ref(10.0)
   const threshold = ref(3.5)
   const isLoading = ref(false)
+  const hasLoadedFromStorage = ref(false)
   const events = ref<SeismicEvent[]>([
     { id: '1', magnitude: 4.2, depth: 12.5, originTime: '2025-01-15T08:23:41Z', location: '四川雅安' },
     { id: '2', magnitude: 3.8, depth: 8.3, originTime: '2025-01-14T14:12:05Z', location: '云南大理' },
@@ -33,10 +42,131 @@ export const useSeismicStore = defineStore('seismic', () => {
   })
   const showAlertDialog = ref(false)
   let alertPollTimer: ReturnType<typeof setInterval> | null = null
+  let storageSaveTimer: ReturnType<typeof setTimeout> | null = null
 
   const pendingAlerts = computed(() => alerts.value.filter(a => !a.acknowledged))
   const pendingAlertCount = computed(() => pendingAlerts.value.length)
   const hasCriticalAlert = computed(() => pendingAlerts.value.some(a => a.severity === 'critical'))
+
+  function safeSetItem(key: string, value: string): boolean {
+    try {
+      localStorage.setItem(key, value)
+      return true
+    } catch (e) {
+      console.warn(`Failed to save ${key} to localStorage`, e)
+      return false
+    }
+  }
+
+  function safeGetItem(key: string): string | null {
+    try {
+      return localStorage.getItem(key)
+    } catch (e) {
+      console.warn(`Failed to read ${key} from localStorage`, e)
+      return null
+    }
+  }
+
+  function saveToStorage() {
+    if (storageSaveTimer) {
+      clearTimeout(storageSaveTimer)
+    }
+    storageSaveTimer = setTimeout(() => {
+      safeSetItem(STORAGE_KEYS.ALERTS, JSON.stringify(alerts.value))
+      safeSetItem(STORAGE_KEYS.PICKS, JSON.stringify(picks.value))
+      safeSetItem(STORAGE_KEYS.ALERT_CONFIG, JSON.stringify(alertConfig.value))
+      safeSetItem(STORAGE_KEYS.SELECTED_STATION, JSON.stringify(selectedStation.value))
+      if (waveform.value) {
+        const saved = safeSetItem(STORAGE_KEYS.WAVEFORM, JSON.stringify(waveform.value))
+        if (!saved) {
+          localStorage.removeItem(STORAGE_KEYS.WAVEFORM)
+        }
+      }
+    }, 100)
+  }
+
+  function loadFromStorage() {
+    const savedAlerts = safeGetItem(STORAGE_KEYS.ALERTS)
+    if (savedAlerts) {
+      try {
+        const parsed = JSON.parse(savedAlerts)
+        if (Array.isArray(parsed)) {
+          alerts.value = parsed.filter(
+            (a: any) => a && typeof a.id === 'string' && typeof a.pick_id === 'string'
+          )
+        }
+      } catch (e) {
+        console.warn('Failed to parse saved alerts', e)
+      }
+    }
+
+    const savedPicks = safeGetItem(STORAGE_KEYS.PICKS)
+    if (savedPicks) {
+      try {
+        const parsed = JSON.parse(savedPicks)
+        if (Array.isArray(parsed)) {
+          picks.value = parsed
+        }
+      } catch (e) {
+        console.warn('Failed to parse saved picks', e)
+      }
+    }
+
+    const savedConfig = safeGetItem(STORAGE_KEYS.ALERT_CONFIG)
+    if (savedConfig) {
+      try {
+        const parsed = JSON.parse(savedConfig)
+        alertConfig.value = { ...alertConfig.value, ...parsed }
+      } catch (e) {
+        console.warn('Failed to parse saved alert config', e)
+      }
+    }
+
+    const savedStation = safeGetItem(STORAGE_KEYS.SELECTED_STATION)
+    if (savedStation) {
+      try {
+        const parsed = JSON.parse(savedStation)
+        if (parsed && parsed.id) {
+          const match = stations.value.find(s => s.id === parsed.id)
+          selectedStation.value = match || parsed
+        }
+      } catch (e) {
+        console.warn('Failed to parse saved station', e)
+      }
+    }
+
+    const savedWaveform = safeGetItem(STORAGE_KEYS.WAVEFORM)
+    if (savedWaveform) {
+      try {
+        const parsed = JSON.parse(savedWaveform)
+        if (parsed && Array.isArray(parsed.time)) {
+          waveform.value = parsed
+        }
+      } catch (e) {
+        console.warn('Failed to parse saved waveform', e)
+      }
+    }
+
+    hasLoadedFromStorage.value = true
+
+    if (alerts.value.length > 0) {
+      const isNightNow = checkLocalNightTime()
+      isNight.value = isNightNow
+      if (isNightNow && pendingAlertCount.value > 0) {
+        showAlertDialog.value = true
+      }
+    }
+  }
+
+  watch(
+    () => [alerts.value, picks.value, alertConfig.value, selectedStation.value, waveform.value],
+    () => {
+      if (hasLoadedFromStorage.value) {
+        saveToStorage()
+      }
+    },
+    { deep: true }
+  )
 
   function generateMockWaveform(): WaveformData {
     const sr = 100
@@ -191,6 +321,21 @@ export const useSeismicStore = defineStore('seismic', () => {
     }
   }
 
+  function clearAllPersistedData() {
+    try {
+      localStorage.removeItem(STORAGE_KEYS.ALERTS)
+      localStorage.removeItem(STORAGE_KEYS.PICKS)
+      localStorage.removeItem(STORAGE_KEYS.WAVEFORM)
+      localStorage.removeItem(STORAGE_KEYS.SELECTED_STATION)
+    } catch (e) {
+      console.warn('Failed to clear persisted data', e)
+    }
+    alerts.value = []
+    picks.value = []
+    waveform.value = null
+    selectedStation.value = null
+  }
+
   function loadMockData() {
     waveform.value = generateMockWaveform()
     picks.value = [
@@ -259,11 +404,12 @@ export const useSeismicStore = defineStore('seismic', () => {
 
   return {
     waveform, picks, selectedStation, staWindow, ltaWindow, threshold,
-    isLoading, events, stations,
+    isLoading, events, stations, hasLoadedFromStorage,
     alerts, isNight, alertConfig, showAlertDialog,
     pendingAlerts, pendingAlertCount, hasCriticalAlert,
     loadMockData, staLtaPicking, uploadAndAnalyze, generateMockWaveform,
     evaluatePicksForAlerts, acknowledgeAlert, acknowledgeAllAlerts,
     startAlertPolling, stopAlertPolling,
+    loadFromStorage, saveToStorage, clearAllPersistedData,
   }
 })

@@ -11,7 +11,7 @@
           <p>检测到 <strong>{{ store.pendingAlertCount }}</strong> 条待处理高置信度震相拾取结果，请及时确认</p>
         </div>
         <div class="alert-actions">
-          <button @click="store.showAlertDialog = true" class="btn-view">
+          <button @click="openDialog" class="btn-view">
             查看详情 ({{ store.pendingAlertCount }})
           </button>
           <button @click="store.acknowledgeAllAlerts()" class="btn-ack-all">
@@ -21,12 +21,12 @@
       </div>
     </div>
 
-    <Transition name="slide-down">
-      <div v-if="store.showAlertDialog" class="alert-dialog-backdrop" @click.self="store.showAlertDialog = false">
-        <div class="alert-dialog">
+    <Transition name="fade">
+      <div v-if="dialogVisible" class="alert-dialog-backdrop" @click.self="closeDialog">
+        <div class="alert-dialog" @click.stop>
           <div class="alert-dialog-header">
-            <h3>🚨 夜间告警 — 待处理拾取结果</h3>
-            <button @click="store.showAlertDialog = false" class="btn-close">&times;</button>
+            <h3>🚨 夜间告警 — 震相拾取提醒</h3>
+            <button @click="closeDialog" class="btn-close">&times;</button>
           </div>
 
           <div class="alert-config-bar">
@@ -44,7 +44,34 @@
             </label>
           </div>
 
-          <div class="alert-list">
+          <div class="alert-tabs">
+            <button
+              class="alert-tab"
+              :class="{ active: activeTab === 'pending' }"
+              @click="activeTab = 'pending'"
+            >
+              待处理
+              <span v-if="store.pendingAlertCount > 0" class="tab-badge pending-badge">
+                {{ store.pendingAlertCount }}
+              </span>
+            </button>
+            <button
+              class="alert-tab"
+              :class="{ active: activeTab === 'acknowledged' }"
+              @click="activeTab = 'acknowledged'"
+            >
+              已确认
+              <span v-if="acknowledgedCount > 0" class="tab-badge ack-badge">
+                {{ acknowledgedCount }}
+              </span>
+            </button>
+          </div>
+
+          <div class="alert-list" v-if="activeTab === 'pending'">
+            <div v-if="store.pendingAlertCount === 0" class="empty-state">
+              <span class="empty-icon">✅</span>
+              <p>暂无待处理告警</p>
+            </div>
             <div
               v-for="alert in store.pendingAlerts"
               :key="alert.id"
@@ -73,11 +100,39 @@
             </div>
           </div>
 
+          <div class="alert-list" v-else>
+            <div v-if="acknowledgedCount === 0" class="empty-state">
+              <span class="empty-icon">📋</span>
+              <p>暂无已确认记录</p>
+            </div>
+            <div
+              v-for="alert in acknowledgedAlerts"
+              :key="alert.id"
+              class="alert-item acknowledged-item"
+            >
+              <div class="alert-item-left">
+                <span class="severity-badge badge-ack">已确认</span>
+                <span class="pick-type" :class="alert.pick_type === 'P' ? 'type-p' : 'type-s'">
+                  {{ alert.pick_type }} 波
+                </span>
+                <span class="pick-conf">{{ (alert.confidence * 100).toFixed(0) }}%</span>
+              </div>
+              <div class="alert-item-center">
+                <span class="pick-time">到达时间: {{ alert.pick_time.toFixed(2) }}s</span>
+                <span v-if="alert.station_name" class="pick-station">台站: {{ alert.station_name }}</span>
+                <span class="pick-created">确认: {{ alert.acknowledged_by }} · {{ formatTime(alert.acknowledged_at) }}</span>
+              </div>
+              <div class="alert-item-right">
+                <span class="ack-check">✓</span>
+              </div>
+            </div>
+          </div>
+
           <div class="alert-dialog-footer">
             <span class="footer-info">
-              已确认: {{ store.alerts.filter(a => a.acknowledged).length }} | 待处理: {{ store.pendingAlertCount }}
+              总计 {{ store.alerts.length }} 条 | 待处理 {{ store.pendingAlertCount }} | 已确认 {{ acknowledgedCount }}
             </span>
-            <button @click="store.acknowledgeAllAlerts()" class="btn-ack-all-lg">
+            <button v-if="activeTab === 'pending' && store.pendingAlertCount > 0" @click="store.acknowledgeAllAlerts()" class="btn-ack-all-lg">
               全部确认处理
             </button>
           </div>
@@ -88,11 +143,36 @@
 </template>
 
 <script setup lang="ts">
+import { ref, computed, watch } from 'vue'
 import { useSeismicStore } from '../store/seismic'
 
 const store = useSeismicStore()
+const activeTab = ref<'pending' | 'acknowledged'>('pending')
+const dialogVisible = ref(false)
 
-function formatTime(isoStr: string): string {
+const acknowledgedAlerts = computed(() =>
+  store.alerts.filter(a => a.acknowledged)
+)
+
+const acknowledgedCount = computed(() => acknowledgedAlerts.value.length)
+
+watch(() => store.showAlertDialog, (val) => {
+  dialogVisible.value = val
+})
+
+function openDialog() {
+  store.showAlertDialog = true
+  dialogVisible.value = true
+  activeTab.value = 'pending'
+}
+
+function closeDialog() {
+  store.showAlertDialog = false
+  dialogVisible.value = false
+}
+
+function formatTime(isoStr: string | null): string {
+  if (!isoStr) return ''
   try {
     const d = new Date(isoStr)
     return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -225,6 +305,16 @@ function formatTime(isoStr: string): string {
   background: #fbbf24;
 }
 
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+
 .alert-dialog-backdrop {
   position: fixed;
   inset: 0;
@@ -242,7 +332,7 @@ function formatTime(isoStr: string): string {
   border-radius: 16px;
   width: 90%;
   max-width: 720px;
-  max-height: 80vh;
+  max-height: 85vh;
   display: flex;
   flex-direction: column;
   box-shadow: 0 25px 60px rgba(0, 0, 0, 0.5);
@@ -309,6 +399,53 @@ function formatTime(isoStr: string): string {
   font-weight: 600;
 }
 
+.alert-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 12px 20px 0;
+  border-bottom: 1px solid #1f2937;
+}
+
+.alert-tab {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 13px;
+  padding: 8px 16px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.alert-tab:hover {
+  color: #e2e8f0;
+}
+
+.alert-tab.active {
+  color: #fbbf24;
+  border-bottom-color: #fbbf24;
+}
+
+.tab-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+.pending-badge {
+  background: #ef4444;
+  color: #fff;
+}
+
+.ack-badge {
+  background: #10b981;
+  color: #fff;
+}
+
 .alert-list {
   flex: 1;
   overflow-y: auto;
@@ -316,6 +453,26 @@ function formatTime(isoStr: string): string {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: 40vh;
+}
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  color: #64748b;
+}
+
+.empty-icon {
+  font-size: 36px;
+  margin-bottom: 8px;
+}
+
+.empty-state p {
+  margin: 0;
+  font-size: 14px;
 }
 
 .alert-item {
@@ -348,6 +505,12 @@ function formatTime(isoStr: string): string {
   background: linear-gradient(90deg, rgba(234, 179, 8, 0.06), #1e293b 30%);
 }
 
+.acknowledged-item {
+  border-left-color: #10b981 !important;
+  background: linear-gradient(90deg, rgba(16, 185, 129, 0.06), #1e293b 30%) !important;
+  opacity: 0.75;
+}
+
 .alert-item-left {
   display: flex;
   align-items: center;
@@ -376,6 +539,11 @@ function formatTime(isoStr: string): string {
 .badge-medium {
   background: #eab308;
   color: #000;
+}
+
+.badge-ack {
+  background: #065f46;
+  color: #6ee7b7;
 }
 
 .pick-type {
@@ -439,6 +607,12 @@ function formatTime(isoStr: string): string {
   background: #10b981;
 }
 
+.ack-check {
+  color: #10b981;
+  font-size: 20px;
+  font-weight: bold;
+}
+
 .alert-dialog-footer {
   display: flex;
   align-items: center;
@@ -466,24 +640,5 @@ function formatTime(isoStr: string): string {
 
 .btn-ack-all-lg:hover {
   background: #f59e0b;
-}
-
-.slide-down-enter-active {
-  animation: slideDown 0.3s ease-out;
-}
-
-.slide-down-leave-active {
-  animation: slideDown 0.2s ease-in reverse;
-}
-
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    transform: translateY(-20px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
 }
 </style>

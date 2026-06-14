@@ -113,12 +113,16 @@
 </template>
 
 <script setup lang="ts">
-import { onUnmounted } from 'vue'
+import { onMounted, onUnmounted } from 'vue'
 import { useSeismicStore } from './store/seismic'
 import WaveformChart from './components/WaveformChart.vue'
 import NightAlertPanel from './components/NightAlertPanel.vue'
 
 const store = useSeismicStore()
+
+onMounted(() => {
+  store.loadFromStorage()
+})
 
 onUnmounted(() => {
   store.stopAlertPolling()
